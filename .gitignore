@@ -1,2 +1,8 @@
 pass.md
 .claude/
+
+# Данные — только на сервере, не публиковать
+data/gold/
+data/documents.zip
+leaderboard.csv
+eval_details.jsonl

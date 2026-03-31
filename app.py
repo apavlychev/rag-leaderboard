@@ -17,6 +17,8 @@ DETAILS_PATH = "eval_details.jsonl"
 QUESTIONS_DOWNLOAD_PATH = os.getenv("QUESTIONS_DOWNLOAD_PATH", QUESTIONS_PATH)
 DOCUMENTS_ZIP_PATH = os.getenv("DOCUMENTS_ZIP_PATH", "data/documents.zip")
 
+SHOW_DETAILS = os.getenv("SHOW_DETAILS", "0") == "1"
+
 LB_COLUMNS = [
     "filename",
     "Wrong", "Correct",
@@ -276,35 +278,43 @@ def build_ui():
         gr.Markdown("---")
 
         # ── 5. Детали оценки ───────────────────────────────────────────────────
-        gr.Markdown("## 🔍 Evaluation details")
-        details_dropdown = gr.Dropdown(
-            choices=list_submissions(),
-            value=list_submissions()[0] if list_submissions() else None,
-            label="Select submission",
-            interactive=True,
-        )
-        out_details = gr.HTML(value=load_latest_details_html())
+        if SHOW_DETAILS:
+            gr.Markdown("## 🔍 Evaluation details")
+            details_dropdown = gr.Dropdown(
+                choices=list_submissions(),
+                value=list_submissions()[0] if list_submissions() else None,
+                label="Select submission",
+                interactive=True,
+            )
+            out_details = gr.HTML(value=load_latest_details_html())
+        else:
+            gr.Markdown("## 🔍 Evaluation details OFF")
+            details_dropdown = gr.Dropdown(visible=False)
+            out_details = gr.HTML(visible=False)
 
         # ── Привязка событий ───────────────────────────────────────────────────
         def do_refresh():
             ensure_leaderboard()
             subs = list_submissions()
-            return (
-                load_sorted_leaderboard(),
-                gr.update(choices=subs, value=subs[0] if subs else None),
-                load_latest_details_html(),
-            )
+            if SHOW_DETAILS:
+                return (
+                    load_sorted_leaderboard(),
+                    gr.update(choices=subs, value=subs[0] if subs else None),
+                    load_latest_details_html(),
+                )
+            return load_sorted_leaderboard(), gr.update(), gr.update()
 
         refresh_btn.click(
             fn=do_refresh,
             inputs=[],
             outputs=[out_df, details_dropdown, out_details],
         )
-        details_dropdown.change(
-            fn=load_details_by_label,
-            inputs=[details_dropdown],
-            outputs=[out_details],
-        )
+        if SHOW_DETAILS:
+            details_dropdown.change(
+                fn=load_details_by_label,
+                inputs=[details_dropdown],
+                outputs=[out_details],
+            )
         submit_btn.click(
             fn=submit_file,
             inputs=[file_in],
