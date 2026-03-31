@@ -1,4 +1,4 @@
-# app.py — RAG Leaderboard v2 (LLM-as-judge via xAI Grok)
+# app.py — RAG Leaderboard v2.1 (local deploy, LLM-as-judge via xAI Grok)
 import os
 import json
 import time
@@ -10,28 +10,12 @@ from src.submission.check_validity import check_submission
 from src.submission.submit import evaluate_submission
 from src.envs import load_jsonl, QUESTIONS_PATH
 
-from huggingface_hub import hf_hub_download, HfApi
-
-HF_TOKEN = os.getenv("HF_TOKEN")
-THIS_SPACE_ID = os.getenv("THIS_SPACE_ID", "datakomarov/RAG-LB-v2")
-
 LEADERBOARD_PATH = "leaderboard.csv"
 DETAILS_PATH = "eval_details.jsonl"
 
-
-def _load_persistent_files():
-    for fname in [LEADERBOARD_PATH, DETAILS_PATH]:
-        try:
-            hf_hub_download(
-                repo_id=THIS_SPACE_ID,
-                filename=fname,
-                repo_type="space",
-                token=HF_TOKEN,
-                local_dir=".",
-            )
-        except Exception:
-            pass
-
+# Файлы для скачивания
+QUESTIONS_DOWNLOAD_PATH = os.getenv("QUESTIONS_DOWNLOAD_PATH", QUESTIONS_PATH)
+DOCUMENTS_ZIP_PATH = os.getenv("DOCUMENTS_ZIP_PATH", "data/documents.zip")
 
 LB_COLUMNS = [
     "filename",
@@ -99,16 +83,6 @@ def save_detail_record(filename: str, timestamp: str, details: list) -> None:
     record = {"filename": filename, "timestamp": timestamp, "details": details}
     with open(DETAILS_PATH, "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    try:
-        HfApi().upload_file(
-            path_or_fileobj=DETAILS_PATH,
-            path_in_repo=DETAILS_PATH,
-            repo_id=THIS_SPACE_ID,
-            repo_type="space",
-            token=HF_TOKEN,
-        )
-    except Exception as e:
-        print(f"Warning: could not upload eval_details to HF: {e}")
 
 
 def list_submissions() -> list[str]:
@@ -123,7 +97,7 @@ def format_details_html(details: list) -> str:
     groups = {0: [], 1: []}
     for d in details:
         score = d.get("score", 0)
-        score = 1 if score >= 1 else 0  # маппим legacy score=2 → 1
+        score = 1 if score >= 1 else 0
         groups[score].append(d)
 
     labels = {
@@ -167,6 +141,20 @@ def load_latest_details_html() -> str:
     if not records:
         return "<p>No evaluation details yet.</p>"
     return format_details_html(records[-1].get("details", []))
+
+
+# ── Downloads ─────────────────────────────────────────────────────────────────
+
+def download_questions():
+    if os.path.exists(QUESTIONS_DOWNLOAD_PATH):
+        return QUESTIONS_DOWNLOAD_PATH
+    return None
+
+
+def download_documents():
+    if os.path.exists(DOCUMENTS_ZIP_PATH):
+        return DOCUMENTS_ZIP_PATH
+    return None
 
 
 # ── Submit ────────────────────────────────────────────────────────────────────
@@ -216,17 +204,6 @@ def submit_file(file_obj):
     df.loc[len(df)] = row
     df.to_csv(LEADERBOARD_PATH, index=False)
 
-    try:
-        HfApi().upload_file(
-            path_or_fileobj=LEADERBOARD_PATH,
-            path_in_repo=LEADERBOARD_PATH,
-            repo_id=THIS_SPACE_ID,
-            repo_type="space",
-            token=HF_TOKEN,
-        )
-    except Exception as e:
-        print(f"Warning: could not upload leaderboard to HF: {e}")
-
     summary = (
         f"✅ Submitted! "
         f"Answered: {n}/{total} | Wrong: {wrong} | Correct: {correct} | "
@@ -240,13 +217,12 @@ def submit_file(file_obj):
 # ── UI ────────────────────────────────────────────────────────────────────────
 
 def build_ui():
-    _load_persistent_files()
     ensure_leaderboard()
 
-    with gr.Blocks(title="RAG Leaderboard v2") as demo:
+    with gr.Blocks(title="RAG Arena") as demo:
 
         gr.Markdown(
-            "# 🏁 RAG Benchmark — LLM-as-Judge\n"
+            "# 🏁 RAG Arena — LLM-as-Judge Benchmark\n"
             "Upload your system's answers in JSONL format to see how they score. "
             "Each answer is graded by **Grok** as **Correct ✅ or Wrong ❌**."
         )
@@ -258,7 +234,23 @@ def build_ui():
 
         gr.Markdown("---")
 
-        # ── 2. Форма сабмита ───────────────────────────────────────────────────
+        # ── 2. Скачать датасет ────────────────────────────────────────────────
+        gr.Markdown("## 📥 Download dataset")
+        with gr.Row():
+            btn_questions = gr.DownloadButton(
+                label="📋 Download questions (JSONL)",
+                value=QUESTIONS_DOWNLOAD_PATH if os.path.exists(QUESTIONS_DOWNLOAD_PATH) else None,
+                variant="secondary",
+            )
+            btn_documents = gr.DownloadButton(
+                label="📄 Download documents (ZIP)",
+                value=DOCUMENTS_ZIP_PATH if os.path.exists(DOCUMENTS_ZIP_PATH) else None,
+                variant="secondary",
+            )
+
+        gr.Markdown("---")
+
+        # ── 3. Форма сабмита ───────────────────────────────────────────────────
         gr.Markdown(
             "## 📤 Submit your answers\n\n"
             "**Format** — one JSON per line:\n"
@@ -273,19 +265,17 @@ def build_ui():
 
         gr.Markdown("---")
 
-        # ── 3. Dataset info ────────────────────────────────────────────────────
+        # ── 4. Dataset info ────────────────────────────────────────────────────
         gr.Markdown(
             "## 📋 Dataset info\n"
-            "- Questions: `data/questions/questions_public.jsonl`\n"
-            "- Gold answers: stored privately, loaded at evaluation time\n"
             "- Judge model: **Grok** (via xAI API, `grok-4-1-fast-reasoning` by default)\n"
             "- Scoring: **binary** — Correct or Wrong, no partial credit\n"
-            "- Eval details: persisted in `eval_details.jsonl` on this Space"
+            "- Gold answers: stored privately on server, loaded at evaluation time\n"
         )
 
         gr.Markdown("---")
 
-        # ── 4. Детали оценки ───────────────────────────────────────────────────
+        # ── 5. Детали оценки ───────────────────────────────────────────────────
         gr.Markdown("## 🔍 Evaluation details")
         details_dropdown = gr.Dropdown(
             choices=list_submissions(),
@@ -297,7 +287,6 @@ def build_ui():
 
         # ── Привязка событий ───────────────────────────────────────────────────
         def do_refresh():
-            _load_persistent_files()
             ensure_leaderboard()
             subs = list_submissions()
             return (
