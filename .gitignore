@@ -1,8 +1,13 @@
 pass.md
 .claude/
 
+# Environment variables (secret)
+.env
+.env.local
+
 # Данные — только на сервере, не публиковать
 data/gold/
 data/documents.zip
 leaderboard.csv
 eval_details.jsonl
+venv

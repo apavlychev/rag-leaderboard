@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Читает ВСЕ .md файлы из текущей директории,
-для каждого генерирует вопросы, ответы и контекст через Grok API
+для каждого генерирует вопросы, ответы и контекст через OpenAI-compatible API
 с использованием Structured Outputs (response_format с JSON Schema),
 и сохраняет результат в .jsonl файл с тем же именем.
 
@@ -14,27 +14,44 @@
     pip install openai
 
 Переменная окружения:
-    XAI_API_KEY — ваш API ключ от xAI (Grok)
+    OPENAI_API_KEY — ваш API ключ (OpenAI, xAI, DeepSeek, or any OpenAI-compatible provider)
 """
 
+import hashlib
+import logging
 import os
 import json
 import glob
 import time
 
 from openai import OpenAI, RateLimitError, APIConnectionError, APITimeoutError, InternalServerError
+from dotenv import load_dotenv
+
+# Загружаем .env (по умолчанию ищет файл .env)
+load_dotenv()
+
+
+# ──────────────────────────────────────────────
+# Logging
+# ──────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────
 # Настройки
 # ──────────────────────────────────────────────
-GROK_MODEL         = "grok-4-1-fast-reasoning"
+JUDGE_MODEL        = os.getenv("EVAL_MODEL", "grok-4-1-fast-reasoning")
 CHARS_PER_QUESTION  = 1000  # ~1 вопрос на 1000 символов
 MIN_QUESTIONS_TOTAL = 1     # минимум вопросов на документ
 MAX_QUESTIONS_CHUNK = 50    # максимум вопросов за один запрос (один чанк)
 CONTEXT_MAX_TOKENS  = 512
 REQUEST_TIMEOUT    = 600
 
-MAX_RETRIES        = 5
+MAX_RETRIES        = 3
 RETRY_BASE_DELAY   = 5
 RATE_LIMIT_DELAY   = 15
 
@@ -83,13 +100,17 @@ QA_SCHEMA = {
 
 
 def get_api_key() -> str:
-    key = os.environ.get("XAI_API_KEY", "")
+    key = os.environ.get("OPENAI_API_KEY", "")
     if not key:
         raise EnvironmentError(
-            "Переменная окружения XAI_API_KEY не задана.\n"
-            "Задайте её: export XAI_API_KEY='your_key_here'"
+            "Переменная окружения OPENAI_API_KEY не задана.\n"
+            "Задайте её: export OPENAI_API_KEY='your_key_here'"
         )
     return key
+
+
+def get_base_url() -> str:
+    return os.getenv("OPENAI_BASE_URL", "https://api.x.ai/v1")
 
 
 def find_all_md(directory: str) -> list[str]:
@@ -119,6 +140,11 @@ def split_into_chunks(text: str, chunk_size: int) -> list[str]:
     return [c.strip() for c in chunks if c.strip()]
 
 
+def simple_hash(text: str) -> str:
+    """Простой детерминированный хеш для генерации ID."""
+    return hashlib.md5(text.encode()).hexdigest()[:12]
+
+
 def call_with_retry(client: OpenAI, **kwargs) -> object:
     """Запрос к API с повторами при временных ошибках."""
     for attempt in range(1, MAX_RETRIES + 1):
@@ -128,14 +154,14 @@ def call_with_retry(client: OpenAI, **kwargs) -> object:
         except RateLimitError:
             if attempt == MAX_RETRIES:
                 raise
-            print(f"\n   ⚠️  Rate limit (попытка {attempt}/{MAX_RETRIES}), ждём {RATE_LIMIT_DELAY} сек...")
+            logger.warning("Rate limit (попытка %d/%d), ждём %d сек...", attempt, MAX_RETRIES, RATE_LIMIT_DELAY)
             time.sleep(RATE_LIMIT_DELAY)
 
         except (APIConnectionError, APITimeoutError, InternalServerError) as e:
             if attempt == MAX_RETRIES:
                 raise
             delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
-            print(f"\n   ⚠️  {type(e).__name__} (попытка {attempt}/{MAX_RETRIES}), ждём {delay} сек...")
+            logger.warning("%s (попытка %d/%d), ждём %d сек...", type(e).__name__, attempt, MAX_RETRIES, delay)
             time.sleep(delay)
 
 
@@ -155,7 +181,7 @@ def get_doc_identity(client: OpenAI, text: str) -> str:
 """
     response = call_with_retry(
         client,
-        model=GROK_MODEL,
+        model=JUDGE_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
         timeout=120,
@@ -192,7 +218,7 @@ def generate_qa_for_chunk(client: OpenAI, chunk: str, doc_identity: str, num_que
 
     response = call_with_retry(
         client,
-        model=GROK_MODEL,
+        model=JUDGE_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
         response_format=QA_SCHEMA,
@@ -209,13 +235,12 @@ def process_file(client: OpenAI, md_path: str) -> str:
 
     char_count = len(text)
     total_questions = max(MIN_QUESTIONS_TOTAL, char_count // CHARS_PER_QUESTION)
-    print(f"   Символов: {char_count} → вопросов: {total_questions}")
+    logger.info("   Символов: %d → вопросов: %d", char_count, total_questions)
 
     # Шаг 1: описание документа
-    print(f"   Шаг 1: определяем тип и контекст документа...", end=" ", flush=True)
+    logger.info("   Шаг 1: определяем тип и контекст документа...")
     doc_identity = get_doc_identity(client, text)
-    print("✓")
-    print(f"   → {doc_identity[:120].replace(chr(10), ' ')}...")
+    logger.info("   ✓ → %s...", doc_identity[:120].replace(chr(10), " "))
 
     # Шаг 2: генерация Q&A
     use_chunks = char_count > CHUNK_THRESHOLD
@@ -223,13 +248,13 @@ def process_file(client: OpenAI, md_path: str) -> str:
 
     if not use_chunks:
         n_q = min(total_questions, MAX_QUESTIONS_CHUNK)
-        print(f"   Шаг 2: генерируем {n_q} вопросов...", end=" ", flush=True)
+        logger.info("   Шаг 2: генерируем %d вопросов...", n_q)
         t0 = time.time()
         all_qa = generate_qa_for_chunk(client, text, doc_identity, n_q)
-        print(f"✓ получено пар: {len(all_qa)} ({time.time() - t0:.1f} сек)")
+        logger.info("   ✓ получено пар: %d (%.1f сек)", len(all_qa), time.time() - t0)
     else:
         chunks = split_into_chunks(text, CHUNK_SIZE)
-        print(f"   Шаг 2: файл большой, разбит на {len(chunks)} чанков")
+        logger.info("   Шаг 2: файл большой, разбит на %d чанков", len(chunks))
 
         total_chars = sum(len(c) for c in chunks)
         distributed = 0
@@ -241,57 +266,60 @@ def process_file(client: OpenAI, md_path: str) -> str:
             n_q = min(n_q, MAX_QUESTIONS_CHUNK)  # не больше лимита за один запрос
             distributed += n_q
 
-            print(f"   Чанк {i}/{len(chunks)} ({len(chunk)} симв.) → {n_q} вопросов...", end=" ", flush=True)
+            logger.info("   Чанк %d/%d (%d симв.) → %d вопросов...", i, len(chunks), len(chunk), n_q)
             t0 = time.time()
             try:
                 qa = generate_qa_for_chunk(client, chunk, doc_identity, n_q)
                 all_qa.extend(qa)
-                print(f"✓ получено {len(qa)} ({time.time() - t0:.1f} сек)")
+                logger.info("   ✓ получено %d (%.1f сек)", len(qa), time.time() - t0)
             except Exception as e:
-                print(f"❌ пропущен: {e}")
+                logger.error("   ❌ пропущен: %s", e)
 
-    print(f"   Итого пар: {len(all_qa)}")
+    logger.info("   Итого пар: %d", len(all_qa))
 
+    filename = os.path.basename(md_path)
     base_name = os.path.splitext(md_path)[0]
     out_path = base_name + ".jsonl"
 
     with open(out_path, "w", encoding="utf-8") as f:
         for item in all_qa:
+            item["fileName"] = filename
+            item["id"] = simple_hash(item["question"])
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
     return out_path
 
 
 def main():
-    directory = os.path.abspath(".")
-    print(f"📂 Директория: {directory}")
-    print(f"🤖 Модель: {GROK_MODEL}\n")
+    directory = os.path.abspath("./data/utils")
+    logger.info("📂 Директория: %s", directory)
+    logger.info("🤖 Модель: %s", JUDGE_MODEL)
 
     md_files = find_all_md(directory)
-    print(f"📋 Найдено .md файлов: {len(md_files)}\n")
+    logger.info("📋 Найдено .md файлов: %d", len(md_files))
 
     client = OpenAI(
         api_key=get_api_key(),
-        base_url="https://api.x.ai/v1",
+        base_url=get_base_url(),
     )
 
     errors = []
     for i, md_path in enumerate(md_files, 1):
         filename = os.path.basename(md_path)
-        print(f"[{i}/{len(md_files)}] 📄 {filename}")
+        logger.info("[%d/%d] 📄 %s", i, len(md_files), filename)
         try:
             out_path = process_file(client, md_path)
-            print(f"   💾 Сохранено: {os.path.basename(out_path)}\n")
+            logger.info("   💾 Сохранено: %s", os.path.basename(out_path))
         except Exception as e:
-            print(f"   ❌ Ошибка: {e}\n")
+            logger.error("   ❌ Ошибка: %s", e)
             errors.append((filename, str(e)))
 
-    print("─" * 40)
-    print(f"✅ Обработано: {len(md_files) - len(errors)}/{len(md_files)}")
+    logger.info("─" * 40)
+    logger.info("✅ Обработано: %d/%d", len(md_files) - len(errors), len(md_files))
     if errors:
-        print("❌ Ошибки:")
+        logger.error("❌ Ошибки:")
         for fname, err in errors:
-            print(f"   {fname}: {err}")
+            logger.error("   %s: %s", fname, err)
 
 
 if __name__ == "__main__":

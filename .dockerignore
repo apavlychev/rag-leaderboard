@@ -1,0 +1,41 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# Environment
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data (mounted via volumes)
+data/questions/*.jsonl
+data/results/
+data/documents/
+*.jsonl
+*.csv
+*.zip
+
+# Logs
+*.log
+logs/

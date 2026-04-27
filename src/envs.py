@@ -1,11 +1,26 @@
 import os
 import json
 
-# ── xAI / Grok ───────────────────────────────────────────────────────────────
-XAI_API_KEY = os.getenv("XAI_API_KEY", "")
+from dotenv import load_dotenv
+
+# Загружаем .env (по умолчанию ищет файл .env)
+load_dotenv()
+
+# ── OpenAI-Compatible API ───────────────────────────────────────────────────────
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 EVAL_MODEL = os.getenv("EVAL_MODEL", "grok-4-1-fast-reasoning")
 EVAL_CONCURRENCY = int(os.getenv("EVAL_CONCURRENCY", "5"))
 PROXY_URL = os.getenv("PROXY_URL", "")
+
+# ── OpenAI-compatible API ─────────────────────────────────────────────────────
+# Base URL for OpenAI-compatible API
+# Default: https://api.x.ai/v1 (xAI Grok, or any OpenAI-compatible endpoint)
+# Other examples:
+#   - OpenAI: https://api.openai.com/v1
+#   - DeepSeek: https://api.deepseek.com/v1
+#   - Together AI: https://api.together.xyz/v1
+#   - Local LLM: http://localhost:8000/v1
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.x.ai/v1")
 
 # ── Пути к данным ─────────────────────────────────────────────────────────────
 QUESTIONS_PATH = os.getenv("QUESTIONS_PATH", "data/questions/questions_public.jsonl")

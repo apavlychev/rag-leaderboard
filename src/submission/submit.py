@@ -1,19 +1,24 @@
-# src/submission/submit.py  — LLM-as-judge через xAI Grok
+# src/submission/submit.py  — LLM-as-judge через OpenAI-compatible API
 import json
+import logging
 import re
 import httpx
 from openai import OpenAI
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from src.envs import (
-    XAI_API_KEY,
+    OPENAI_API_KEY,
     EVAL_MODEL,
     EVAL_CONCURRENCY,
     PROXY_URL,
+    OPENAI_BASE_URL,
     QUESTIONS_PATH,
     get_gold_path,
     load_jsonl,
 )
+
+# ── Logging ─────────────────────────────────────────────────────────────────────
+logger = logging.getLogger(__name__)
 
 # ── Клиент xAI (ленивая инициализация) ───────────────────────────────────────
 _client = None
@@ -26,8 +31,8 @@ def _get_client():
             timeout=httpx.Timeout(3600.0),
         )
         _client = OpenAI(
-            api_key=XAI_API_KEY,
-            base_url="https://api.x.ai/v1",
+            api_key=OPENAI_API_KEY,
+            base_url=OPENAI_BASE_URL,
             http_client=http_client,
         )
     return _client
@@ -92,7 +97,7 @@ def _eval_one(qid: str, question: str, gold: str, pred: str) -> dict:
         )
         score = _parse_score(resp.choices[0].message.content)
     except Exception as e:
-        print(f"[judge] error on {qid}: {e}")
+        logger.error("[judge] error on %s: %s", qid, e)
         score = 0
 
     return {"id": qid, "question": question, "gold": gold, "pred": pred, "score": score}
@@ -141,7 +146,7 @@ def evaluate_submission(submit_path: str) -> dict:
                 details.append(future.result())
             except Exception as e:
                 qid = futures[future]
-                print(f"[judge] future error on {qid}: {e}")
+                logger.error("[judge] future error on %s: %s", qid, e)
                 details.append({"id": qid, "score": 0})
 
     scores = [d["score"] for d in details]

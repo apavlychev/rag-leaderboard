@@ -3,3 +3,4 @@ httpx[socks]
 pandas
 huggingface_hub
 gradio
+python-dotenv

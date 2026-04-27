@@ -1,6 +1,7 @@
-# app.py — RAG Leaderboard v2.1 (local deploy, LLM-as-judge via xAI Grok)
+# app.py — RAG Leaderboard v2.1 (local deploy, LLM-as-judge via OpenAI-compatible API)
 import os
 import json
+import logging
 import time
 import pandas as pd
 import gradio as gr
@@ -8,10 +9,19 @@ from pathlib import Path
 
 from src.submission.check_validity import check_submission
 from src.submission.submit import evaluate_submission
-from src.envs import load_jsonl, QUESTIONS_PATH
+from src.envs import (
+    OPENAI_API_KEY,
+    EVAL_MODEL,
+    EVAL_CONCURRENCY,
+    PROXY_URL,
+    OPENAI_BASE_URL,
+    QUESTIONS_PATH,
+    get_gold_path,
+    load_jsonl,
+)
 
-LEADERBOARD_PATH = "leaderboard.csv"
-DETAILS_PATH = "eval_details.jsonl"
+LEADERBOARD_PATH = "data/results/leaderboard.csv"
+DETAILS_PATH = "data/results/eval_details.jsonl"
 
 # Файлы для скачивания
 QUESTIONS_DOWNLOAD_PATH = os.getenv("QUESTIONS_DOWNLOAD_PATH", QUESTIONS_PATH)
@@ -27,6 +37,13 @@ LB_COLUMNS = [
 
 LB_DISPLAY_COLUMNS = LB_COLUMNS
 
+# ── Logging ─────────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 # ── Leaderboard ───────────────────────────────────────────────────────────────
 
@@ -194,7 +211,7 @@ def submit_file(file_obj):
     try:
         save_detail_record(filename, timestamp, details)
     except Exception as e:
-        print(f"Warning: could not save details: {e}")
+        logger.warning("Could not save details: %s", e)
 
     row = {
         "timestamp": timestamp, "filename": filename,
@@ -226,7 +243,7 @@ def build_ui():
         gr.Markdown(
             "# 🏁 RAG Arena — LLM-as-Judge Benchmark\n"
             "Upload your system's answers in JSONL format to see how they score. "
-            "Each answer is graded by **Grok** as **Correct ✅ or Wrong ❌**."
+            "Each answer is graded by an **LLM-as-judge** as **Correct ✅ or Wrong ❌**."
         )
 
         # ── 1. Лидерборд ──────────────────────────────────────────────────────
@@ -270,9 +287,9 @@ def build_ui():
         # ── 4. Dataset info ────────────────────────────────────────────────────
         gr.Markdown(
             "## 📋 Dataset info\n"
-            "- Judge model: **Grok** (via xAI API, `grok-4-1-fast-reasoning` by default)\n"
+            f"- Judge model: {OPENAI_BASE_URL}/?model={EVAL_MODEL} (via OpenAI API compatibility, `grok-4-1-fast-reasoning` by default)\n"
             "- Scoring: **binary** — Correct or Wrong, no partial credit\n"
-            "- Gold answers: stored privately on server, loaded at evaluation time\n"
+            f"- Gold answers: stored privately on server {get_gold_path()}, loaded at evaluation time\n"
         )
 
         gr.Markdown("---")
