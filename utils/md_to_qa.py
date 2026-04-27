@@ -283,7 +283,7 @@ def process_file(client: OpenAI, md_path: str) -> str:
 
     with open(out_path, "w", encoding="utf-8") as f:
         for item in all_qa:
-            item["fileName"] = filename
+            item["documentId"] = filename
             item["id"] = simple_hash(item["question"])
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
