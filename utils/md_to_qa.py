@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Читает ВСЕ .md файлы из текущей директории,
+Читает текстовые файлы из указанной директории,
 для каждого генерирует вопросы, ответы и контекст через OpenAI-compatible API
 с использованием Structured Outputs (response_format с JSON Schema),
 и сохраняет результат в .jsonl файл с тем же именем.
@@ -9,14 +9,19 @@
 
 Использование:
     python md_to_qa.py
+    python md_to_qa.py --model gpt-4o --extensions md,txt --merge
+    python md_to_qa.py --directory ./data --extensions txt
 
 Требования:
-    pip install openai
+    pip install openai python-dotenv
 
-Переменная окружения:
-    OPENAI_API_KEY — ваш API ключ (OpenAI, xAI, DeepSeek, or any OpenAI-compatible provider)
+Переменные окружения:
+    OPENAI_API_KEY — ваш API ключ (обязательно)
+    EVAL_MODEL     — модель по умолчанию (опционально)
+    OPENAI_BASE_URL — базовый URL API (опционально)
 """
 
+import argparse
 import hashlib
 import logging
 import os
@@ -44,7 +49,6 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────
 # Настройки
 # ──────────────────────────────────────────────
-JUDGE_MODEL        = os.getenv("EVAL_MODEL", "grok-4-1-fast-reasoning")
 CHARS_PER_QUESTION  = 1000  # ~1 вопрос на 1000 символов
 MIN_QUESTIONS_TOTAL = 1     # минимум вопросов на документ
 MAX_QUESTIONS_CHUNK = 50    # максимум вопросов за один запрос (один чанк)
@@ -57,6 +61,45 @@ RATE_LIMIT_DELAY   = 15
 
 CHUNK_THRESHOLD    = 50_000
 CHUNK_SIZE         = 40_000
+
+# ──────────────────────────────────────────────
+# CLI
+# ──────────────────────────────────────────────
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Генерирует Q&A пары из текстовых файлов через OpenAI-compatible API"
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Модель для генерации (переопределяет EVAL_MODEL из env)"
+    )
+    parser.add_argument(
+        "--merge",
+        action="store_true",
+        help="Объединить все результаты в один файл result.jsonl"
+    )
+    parser.add_argument(
+        "--extensions",
+        type=str,
+        default="md",
+        help="Расширения файлов через запятую (например: md,txt,rst)"
+    )
+    parser.add_argument(
+        "--directory",
+        type=str,
+        default="./data/utils",
+        help="Директория с файлами для обработки"
+    )
+    return parser.parse_args()
+
+
+def get_model(cli_model: str | None) -> str:
+    """Возвращает модель: из CLI > env > default."""
+    if cli_model:
+        return cli_model
+    return os.getenv("EVAL_MODEL", "grok-4-1-fast-reasoning")
 
 # ──────────────────────────────────────────────
 # JSON Schema для structured output
@@ -113,12 +156,34 @@ def get_base_url() -> str:
     return os.getenv("OPENAI_BASE_URL", "https://api.x.ai/v1")
 
 
-def find_all_md(directory: str) -> list[str]:
-    pattern = os.path.join(directory, "*.md")
-    files = sorted(glob.glob(pattern))
+def find_text_files(directory: str, extensions: list[str]) -> list[str]:
+    """Находит все файлы с указанными расширениями."""
+    files = []
+    for ext in extensions:
+        pattern = os.path.join(directory, f"*.{ext.lstrip('.')}")
+        files.extend(glob.glob(pattern))
+
     if not files:
-        raise FileNotFoundError(f"Нет .md файлов в директории: {directory}")
-    return files
+        raise FileNotFoundError(f"Нет файлов с расширениями {extensions} в директории: {directory}")
+
+    return sorted(set(files))  # уникальные, отсортированные
+
+
+def merge_results(output_files: list[str], directory: str) -> None:
+    """Объединяет все jsonl файлы в один в указанной директории."""
+    merged = []
+    for path in output_files:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    merged.append(json.loads(line))
+
+    merge_path = os.path.join(directory, "result.jsonl")
+    with open(merge_path, "w", encoding="utf-8") as f:
+        for item in merged:
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+    logger.info("📦 Объединённый файл: %s (%d записей)", merge_path, len(merged))
 
 
 def split_into_chunks(text: str, chunk_size: int) -> list[str]:
@@ -165,7 +230,7 @@ def call_with_retry(client: OpenAI, **kwargs) -> object:
             time.sleep(delay)
 
 
-def get_doc_identity(client: OpenAI, text: str) -> str:
+def get_doc_identity(client: OpenAI, text: str, model: str) -> str:
     """Шаг 1: кратко описываем документ для контекста при формулировке вопросов."""
     prompt = f"""Прочитай текст ниже и ответь одним абзацем (3-5 предложений):
 - Кто автор (если указан)?
@@ -181,7 +246,7 @@ def get_doc_identity(client: OpenAI, text: str) -> str:
 """
     response = call_with_retry(
         client,
-        model=JUDGE_MODEL,
+        model=model,
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
         timeout=120,
@@ -189,7 +254,7 @@ def get_doc_identity(client: OpenAI, text: str) -> str:
     return response.choices[0].message.content.strip()
 
 
-def generate_qa_for_chunk(client: OpenAI, chunk: str, doc_identity: str, num_questions: int) -> list[dict]:
+def generate_qa_for_chunk(client: OpenAI, chunk: str, doc_identity: str, num_questions: int, model: str) -> list[dict]:
     """Генерирует Q&A для одного куска текста через structured output."""
     prompt = f"""Ты — эксперт по созданию датасетов для оценки RAG-систем.
 
@@ -218,7 +283,7 @@ def generate_qa_for_chunk(client: OpenAI, chunk: str, doc_identity: str, num_que
 
     response = call_with_retry(
         client,
-        model=JUDGE_MODEL,
+        model=model,
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
         response_format=QA_SCHEMA,
@@ -229,7 +294,7 @@ def generate_qa_for_chunk(client: OpenAI, chunk: str, doc_identity: str, num_que
     return data["items"]
 
 
-def process_file(client: OpenAI, md_path: str) -> str:
+def process_file(client: OpenAI, md_path: str, model: str) -> str:
     with open(md_path, "r", encoding="utf-8") as f:
         text = f.read()
 
@@ -239,7 +304,7 @@ def process_file(client: OpenAI, md_path: str) -> str:
 
     # Шаг 1: описание документа
     logger.info("   Шаг 1: определяем тип и контекст документа...")
-    doc_identity = get_doc_identity(client, text)
+    doc_identity = get_doc_identity(client, text, model)
     logger.info("   ✓ → %s...", doc_identity[:120].replace(chr(10), " "))
 
     # Шаг 2: генерация Q&A
@@ -250,7 +315,7 @@ def process_file(client: OpenAI, md_path: str) -> str:
         n_q = min(total_questions, MAX_QUESTIONS_CHUNK)
         logger.info("   Шаг 2: генерируем %d вопросов...", n_q)
         t0 = time.time()
-        all_qa = generate_qa_for_chunk(client, text, doc_identity, n_q)
+        all_qa = generate_qa_for_chunk(client, text, doc_identity, n_q, model)
         logger.info("   ✓ получено пар: %d (%.1f сек)", len(all_qa), time.time() - t0)
     else:
         chunks = split_into_chunks(text, CHUNK_SIZE)
@@ -269,7 +334,7 @@ def process_file(client: OpenAI, md_path: str) -> str:
             logger.info("   Чанк %d/%d (%d симв.) → %d вопросов...", i, len(chunks), len(chunk), n_q)
             t0 = time.time()
             try:
-                qa = generate_qa_for_chunk(client, chunk, doc_identity, n_q)
+                qa = generate_qa_for_chunk(client, chunk, doc_identity, n_q, model)
                 all_qa.extend(qa)
                 logger.info("   ✓ получено %d (%.1f сек)", len(qa), time.time() - t0)
             except Exception as e:
@@ -283,7 +348,7 @@ def process_file(client: OpenAI, md_path: str) -> str:
 
     with open(out_path, "w", encoding="utf-8") as f:
         for item in all_qa:
-            item["documentId"] = filename
+            item["documentId"] = os.path.splitext(filename)[0]
             item["id"] = simple_hash(item["question"])
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
@@ -291,12 +356,19 @@ def process_file(client: OpenAI, md_path: str) -> str:
 
 
 def main():
-    directory = os.path.abspath("./data/utils")
-    logger.info("📂 Директория: %s", directory)
-    logger.info("🤖 Модель: %s", JUDGE_MODEL)
+    args = parse_args()
 
-    md_files = find_all_md(directory)
-    logger.info("📋 Найдено .md файлов: %d", len(md_files))
+    # Настройки из аргументов
+    model = get_model(args.model)
+    extensions = [e.strip() for e in args.extensions.split(",")]
+    directory = os.path.abspath(args.directory)
+
+    logger.info("📂 Директория: %s", directory)
+    logger.info("🤖 Модель: %s", model)
+    logger.info("📋 Расширения: %s", ", ".join(extensions))
+
+    files = find_text_files(directory, extensions)
+    logger.info("📄 Найдено файлов: %d", len(files))
 
     client = OpenAI(
         api_key=get_api_key(),
@@ -304,18 +376,25 @@ def main():
     )
 
     errors = []
-    for i, md_path in enumerate(md_files, 1):
-        filename = os.path.basename(md_path)
-        logger.info("[%d/%d] 📄 %s", i, len(md_files), filename)
+    output_files = []  # для merge
+
+    for i, file_path in enumerate(files, 1):
+        filename = os.path.basename(file_path)
+        logger.info("[%d/%d] 📄 %s", i, len(files), filename)
         try:
-            out_path = process_file(client, md_path)
+            out_path = process_file(client, file_path, model)
+            output_files.append(out_path)
             logger.info("   💾 Сохранено: %s", os.path.basename(out_path))
         except Exception as e:
             logger.error("   ❌ Ошибка: %s", e)
             errors.append((filename, str(e)))
 
+    # Merge если указан флаг
+    if args.merge and output_files:
+        merge_results(output_files, directory)
+
     logger.info("─" * 40)
-    logger.info("✅ Обработано: %d/%d", len(md_files) - len(errors), len(md_files))
+    logger.info("✅ Обработано: %d/%d", len(files) - len(errors), len(files))
     if errors:
         logger.error("❌ Ошибки:")
         for fname, err in errors:
