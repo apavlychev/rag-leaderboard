@@ -275,7 +275,7 @@ def generate_qa_for_chunk(client: OpenAI, chunk: str, doc_identity: str, num_que
 
 3. Избегай тривиальных вопросов "что такое X?" для общеизвестных терминов.
 
-Поле "context" — дословная цитата из текста, где содержится ответ (максимум {CONTEXT_MAX_TOKENS} токенов).
+Поле "context" — дословная цитата из текста *БЕЗ СОКРАЩЕНИЙ ТИПА ...*, где содержится ответ (максимум {CONTEXT_MAX_TOKENS} токенов).
 
 ТЕКСТ:
 {chunk}
@@ -337,8 +337,8 @@ def process_file(client: OpenAI, md_path: str, model: str) -> str:
                 qa = generate_qa_for_chunk(client, chunk, doc_identity, n_q, model)
                 all_qa.extend(qa)
                 logger.info("   ✓ получено %d (%.1f сек)", len(qa), time.time() - t0)
-            except Exception as e:
-                logger.error("   ❌ пропущен: %s", e)
+            except Exception:
+                logger.exception("   ❌ пропущен")
 
     logger.info("   Итого пар: %d", len(all_qa))
 
@@ -385,9 +385,9 @@ def main():
             out_path = process_file(client, file_path, model)
             output_files.append(out_path)
             logger.info("   💾 Сохранено: %s", os.path.basename(out_path))
-        except Exception as e:
-            logger.error("   ❌ Ошибка: %s", e)
-            errors.append((filename, str(e)))
+        except Exception:
+            logger.exception("   ❌ Ошибка")
+            errors.append((filename, "см. stacktrace выше"))
 
     # Merge если указан флаг
     if args.merge and output_files:
